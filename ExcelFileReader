@@ -1,0 +1,424 @@
+import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.util.Strings;
+import org.apache.poi.openxml4j.opc.OPCPackage;
+import org.apache.poi.openxml4j.opc.PackageAccess;
+import org.apache.poi.openxml4j.opc.PackagePart;
+import org.apache.poi.openxml4j.opc.PackageRelationship;
+import org.apache.poi.openxml4j.opc.PackageRelationshipTypes;
+import org.apache.poi.ss.util.CellReference;
+import org.apache.poi.xssf.eventusermodel.ReadOnlySharedStringsTable;
+import org.apache.poi.xssf.eventusermodel.XSSFReader;
+import org.apache.poi.xssf.model.StylesTable;
+import org.apache.poi.xssf.usermodel.XSSFRichTextString;
+import org.openxmlformats.schemas.officeDocument.x2006.customProperties.CTProperty;
+import org.openxmlformats.schemas.officeDocument.x2006.customProperties.PropertiesDocument;
+import org.openxmlformats.schemas.spreadsheetml.x2006.main.CTSheet;
+import org.openxmlformats.schemas.spreadsheetml.x2006.main.CTWorkbook;
+import org.openxmlformats.schemas.spreadsheetml.x2006.main.STSheetState;
+import org.openxmlformats.schemas.spreadsheetml.x2006.main.WorkbookDocument;
+
+import javax.xml.stream.XMLInputFactory;
+import javax.xml.stream.XMLStreamException;
+import javax.xml.stream.XMLStreamReader;
+import java.io.File;
+import java.io.InputStream;
+import java.math.BigDecimal;
+import java.text.DecimalFormat;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+public class ExcelFileReader {
+
+    private OPCPackage opcPkg;
+    private ReadOnlySharedStringsTable stringsTable;
+    private XMLStreamReader xmlReader;
+    private final int MAX_EMPTY_ROW_ALLOWED_BEFORE_BREAK = 50;
+    private String excelFilePath;
+    private List<CTSheet> sheetList;
+    private PropertiesDocument props;
+    private StylesTable stylesTable;
+    private final static String PERCENTAGE_FORMAT = "0.00%";
+
+    public ExcelFileReader(String excelPath) throws Exception {
+        this.excelFilePath = excelPath;
+        this.opcPkg = OPCPackage.open(excelFilePath, PackageAccess.READ);
+        init();
+    }
+
+    public ExcelFileReader(File excelFile) throws Exception {
+        this.opcPkg = OPCPackage.open(excelFile, PackageAccess.READ);
+        init();
+    }
+
+    public ExcelFileReader() {
+    }
+
+    public void initialize(File excelFile) throws Exception {
+        this.opcPkg = OPCPackage.open(excelFile, PackageAccess.READ);
+        init();
+    }
+
+    private void init() throws Exception {
+        this.stringsTable = new ReadOnlySharedStringsTable(opcPkg);
+        PackageRelationship coreDocRelationship = this.opcPkg.getRelationshipsByType(
+                PackageRelationshipTypes.CORE_DOCUMENT).getRelationship(0);
+        PackagePart workbookPart = this.opcPkg.getPart(coreDocRelationship);
+
+        CTWorkbook wbBean = WorkbookDocument.Factory.parse(workbookPart.getInputStream()).getWorkbook();
+        sheetList = wbBean.getSheets().getSheetList();
+        PackageRelationship packageRelationship = opcPkg.getRelationshipsByType(PackageRelationshipTypes.CUSTOM_PROPERTIES).getRelationship(0);
+        if (packageRelationship != null) {
+            PackagePart custPart = opcPkg.getPart(packageRelationship);
+            props = PropertiesDocument.Factory.parse(custPart.getInputStream());
+        }
+    }
+
+    private String getCellValue(String cellType, String formatString) throws XMLStreamException {
+        String value = ""; // by default
+        while (xmlReader.hasNext()) {
+            xmlReader.next();
+            if (xmlReader.isStartElement()) {
+
+                if ("v".equals(xmlReader.getLocalName())) {
+                    if (cellType != null && "s".equals(cellType)) {
+                        int idx = Integer.parseInt(xmlReader.getElementText());
+                        return new XSSFRichTextString(stringsTable.getEntryAt(idx)).toString();
+                    } else {
+                        String s = xmlReader.getElementText();
+                        DecimalFormat df = new DecimalFormat("#.##");
+                        if (s.contains("%")) {
+                            s = s.replaceAll("%", "");
+                            return df.format(Float.parseFloat(s));
+                        } else if (!Strings.isEmpty(formatString) && formatString.contains(PERCENTAGE_FORMAT)) {
+                            BigDecimal bigDecimal = new BigDecimal(s).multiply(new BigDecimal(100));
+                            return df.format(bigDecimal);
+                        }
+                        BigDecimal bigDecimal = new BigDecimal(s);
+                        return df.format(bigDecimal);
+                    }
+                }
+            } else if (xmlReader.isEndElement() && "c".equals(xmlReader.getLocalName())) {
+                break;
+            }
+        }
+        return value;
+    }
+
+    @Override
+    protected void finalize() throws Throwable {
+        if (opcPkg != null)
+            opcPkg.close();
+        super.finalize();
+    }
+
+    public String getHeaderValue(String headerName, String headerSheetName, int headerRowCellIndex) throws Exception {
+        preProcessing(false, 0, headerSheetName);
+        return getHeaderValue(headerName);
+    }
+
+    private String getHeaderValue(String headerName) throws XMLStreamException {
+        boolean headerFound = false;
+        while (xmlReader.hasNext()) {
+            xmlReader.next();
+            if (xmlReader.isStartElement()) {
+                if ("c".equals(xmlReader.getLocalName())) {
+                    String cellType = xmlReader.getAttributeValue(null, "t");
+                    String cellValue = getCellValue(cellType, null);
+                    if (headerFound) {
+                        return cellValue;
+                    }
+                    if (cellValue.equalsIgnoreCase(headerName)) {
+                        headerFound = true;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    public List<String> getHeaders(String headerRowValidationString, String headerSheetName, int headerRow) throws Exception {
+        List<String> list = new ArrayList<>();
+        preProcessing(false, 0, headerSheetName);
+        boolean desiredRowFound = false;
+        while (xmlReader.hasNext()) {
+            xmlReader.next();
+            if (xmlReader.isStartElement()) {
+                if ("c".equals(xmlReader.getLocalName())) {
+                    String cellType = xmlReader.getAttributeValue(null, "t");
+                    String cellValue = getCellValue(cellType, null);
+                    if (cellValue.equalsIgnoreCase(headerRowValidationString)) {
+                        desiredRowFound = true;
+                        continue;
+                    }
+                    if (desiredRowFound) {
+                        list.add(cellValue);
+                    }
+                } else if ("row".equals(xmlReader.getLocalName()) && desiredRowFound) {
+                    break;
+                }
+            }
+        }
+        return list;
+    }
+
+    private void preProcessing(boolean processWithSheetNumber, int sheetNumberToProcess, String sheetNameToProcess) throws Exception {
+
+        int currentSheetNumber = 0;
+        XSSFReader xssfReader = new XSSFReader(opcPkg);
+        this.stylesTable = xssfReader.getStylesTable();
+
+        Iterator<InputStream> sheets = xssfReader.getSheetsData();
+        if (sheets instanceof XSSFReader.SheetIterator) {
+            XSSFReader.SheetIterator sheetiterator = (XSSFReader.SheetIterator) sheets;
+            while (sheetiterator.hasNext()) {
+                InputStream inputStream = sheetiterator.next();
+
+                if ("protectedSheet".equalsIgnoreCase(sheetiterator.getSheetName())) {
+                    continue;
+                }
+                if (processWithSheetNumber) {
+                    if (currentSheetNumber++ == sheetNumberToProcess) {
+                        XMLInputFactory factory = XMLInputFactory.newInstance();
+                        xmlReader = factory.createXMLStreamReader(inputStream);
+                    }
+                } else if (sheetNameToProcess.equalsIgnoreCase(sheetiterator.getSheetName())) {
+                    XMLInputFactory factory = XMLInputFactory.newInstance();
+                    xmlReader = factory.createXMLStreamReader(inputStream);
+                }
+            }
+        }
+        if (xmlReader == null) {
+            throw new Exception("Sheet names are incorrect");
+        }
+    }
+
+    public List<Map<String, String>> getExcelDataAsListOfMap(int sheetNumber, String sheetToReadFrom, int startFromRow, List<String> headers, int headerRowNumber) throws Exception {
+        preProcessing(true, sheetNumber, sheetToReadFrom);
+        String elementName = "row";
+        List<Map<String, String>> data = new ArrayList<>();
+        int currentRowNumber = 0;
+        int consecutiveEmptyCount = 0;
+
+        while (xmlReader.hasNext()) {
+            xmlReader.next();
+            if (xmlReader.isStartElement()) {
+                if (elementName.equals(xmlReader.getLocalName())) {
+
+                    /*Get header row from same sheet if not already provided and throw exception is header row is not unique*/
+                    if (currentRowNumber == headerRowNumber) {
+                        headers = getHeadersIfEmpty(headers);
+                        if (!isUnique(headers)) {
+                            throw new Exception("Headers values are not unique");
+                        }
+                    }
+                    if (currentRowNumber >= startFromRow) {
+                        Map<String, String> map = getRowDataAsMapWithHeaderNameAsKey(headers);
+                        long nonZeroCount = map.values().stream().filter(s -> s.length() > 0).count();
+                        if (nonZeroCount < 1) {
+                            consecutiveEmptyCount++;
+                            if (consecutiveEmptyCount > MAX_EMPTY_ROW_ALLOWED_BEFORE_BREAK) {
+                                break;
+                            }
+                        } else {
+                            consecutiveEmptyCount = 0;
+                            data.add(map);
+                        }
+                    }
+                    currentRowNumber++;
+                }
+            }
+        }
+        return data;
+    }
+
+    private Map<String, String> getRowDataAsMapWithHeaderNameAsKey(List<String> headers) throws XMLStreamException {
+        Map<String, String> map = new HashMap<>();
+        while (xmlReader.hasNext()) {
+            xmlReader.next();
+            if (xmlReader.isStartElement()) {
+                if ("c".equals(xmlReader.getLocalName())) {
+                    CellReference cellReference = new CellReference(xmlReader.getAttributeValue(null, "r"));
+                    String cellType = xmlReader.getAttributeValue(null, "t");
+                    if (cellReference.getCol() < headers.size()) {
+                        String val = getCellValue(cellType, getDataFormatString());
+                        // Do not send default("") value
+                        if (!Strings.isEmpty(val)) {
+                            map.put(headers.get(cellReference.getCol()), val);
+                        }
+                    }
+                }
+            } else if (xmlReader.isEndElement() && "row".equals(xmlReader.getLocalName())) {
+                break;
+            }
+        }
+        return map;
+    }
+
+    public String getSheetName(int sheetNumber) throws Exception {
+
+        int currentSheetNumber = 0;
+        XSSFReader xssfReader = new XSSFReader(opcPkg);
+        Iterator<InputStream> sheets = xssfReader.getSheetsData();
+        if (sheets instanceof XSSFReader.SheetIterator) {
+            XSSFReader.SheetIterator sheetiterator = (XSSFReader.SheetIterator) sheets;
+            while (sheetiterator.hasNext()) {
+                sheetiterator.next();
+                if (currentSheetNumber++ == sheetNumber) {
+                    return sheetiterator.getSheetName();
+                }
+            }
+        }
+        return null;
+    }
+
+
+    public boolean isSheetHidden(int sheetNumber) throws Exception {
+        String sheetName = getSheetName(sheetNumber);
+        for (CTSheet ctSheet : sheetList) {
+            if (ctSheet.getName().equals(sheetName)) {
+                if (ctSheet.getState() == STSheetState.Enum.forString("hidden") || ctSheet.getState() == STSheetState.Enum.forString("veryHidden")) {
+                    return true;
+                } else {
+                    return false;
+                }
+            }
+        }
+        return false;
+    }
+
+    public boolean isSheetHidden(String sheetName) {
+
+        for (CTSheet ctSheet : sheetList) {
+            if (sheetName.equalsIgnoreCase(ctSheet.getName())) {
+                if (ctSheet.getState() == STSheetState.Enum.forString("hidden") || ctSheet.getState() == STSheetState.Enum.forString("veryHidden")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    public int getNumberOfSheets() {
+        int sheetCount = 0;
+        for (CTSheet ctSheet : sheetList) {
+            if ("protectedSheet".equalsIgnoreCase(ctSheet.getName())) {
+                continue;
+            }
+            sheetCount++;
+        }
+        return sheetCount;
+    }
+
+    public List<List<String>> getSheetDataAsListOfLists(boolean withSheetNumber, int sheetNumber, String sheetName, boolean includeHeaderRow, int startFromRowNumber) throws Exception {
+        preProcessing(withSheetNumber, sheetNumber, sheetName);
+
+        String elementName = "row";
+        List<List<String>> rows = new ArrayList<>();
+        int currentRowNumber = 0;
+        int consecutiveEmptyCount = 0;
+        List<String> row;
+
+        while (xmlReader.hasNext()) {
+            xmlReader.next();
+            if (xmlReader.isStartElement()) {
+                if (xmlReader.getLocalName().equals(elementName)) {
+                    if (currentRowNumber++ >= startFromRowNumber) {
+                        row = getRowDataAsList();
+                        long nonZeroCount = row.stream().filter(s -> s.length() > 0).count();
+                        if (nonZeroCount < 1) {
+                            consecutiveEmptyCount++;
+                            if (consecutiveEmptyCount > MAX_EMPTY_ROW_ALLOWED_BEFORE_BREAK) {
+                                break;
+                            }
+                        } else {
+                            consecutiveEmptyCount = 0;
+                            rows.add(row);
+                        }
+                    }
+                }
+            }
+        }
+        return rows;
+    }
+
+    private List<String> getRowDataAsList() throws XMLStreamException {
+        List<String> rowValues = new ArrayList<>();
+        while (xmlReader.hasNext()) {
+            xmlReader.next();
+            if (xmlReader.isStartElement()) {
+                if ("c".equals(xmlReader.getLocalName())) {
+                    CellReference cellReference = new CellReference(xmlReader.getAttributeValue(null, "r"));
+                    // Fill in the possible blank cells!
+                    while (rowValues.size() < cellReference.getCol()) {
+                        rowValues.add("");
+                    }
+                    String cellType = xmlReader.getAttributeValue(null, "t");
+                    rowValues.add(getCellValue(cellType, getDataFormatString()));
+                }
+            } else if (xmlReader.isEndElement() && "row".equals(xmlReader.getLocalName())) {
+                break;
+            }
+        }
+        return rowValues;
+    }
+
+    private List<String> getHeadersIfEmpty(List<String> headers) throws Exception {
+        if (headers == null || headers.isEmpty()) {
+            return getRowDataAsList();
+        }
+        return headers;
+    }
+
+    public boolean isUnique(List<String> list) {
+        return list.stream().filter(s -> !StringUtils.isEmpty(s)).allMatch(new HashSet<>()::add);
+    }
+
+    public String getVersion() {
+        if (props == null) {
+            return null;
+        }
+        return props.getProperties().getPropertyList().stream().filter(
+                ctProperty -> ctProperty.getName().equalsIgnoreCase("version")).findFirst().get().getLpwstr();
+    }
+
+    public String getCustomProperty(String propertyName) {
+        if (props == null) {
+            return null;
+        }
+        Optional<CTProperty> propertyOptional = props.getProperties().getPropertyList().stream().filter(
+                ctProperty -> ctProperty.getName().equalsIgnoreCase(propertyName)).findFirst();
+        if (!propertyOptional.isPresent()) {
+            return null;
+        } else {
+            CTProperty property = propertyOptional.get();
+            if (property.isSetLpwstr()) {
+                return property.getLpwstr();
+            } else if (property.isSetI4()) {
+                return property.getI4() + "";
+            } else if (property.isSetDate()) {
+                return property.getDate() + "";
+            } else if (property.isSetBool()) {
+                return property.getBool() + "";
+            }
+        }
+        return null;
+    }
+
+    private String getDataFormatString() {
+        String attributeVal = xmlReader.getAttributeValue(null, "s");
+        if (attributeVal != null) {
+            try {
+                int index = Integer.parseInt(xmlReader.getAttributeValue(null, "s"));
+                String formatString = stylesTable.getStyleAt(index).getDataFormatString();
+                return formatString;
+            } catch (Exception e) {
+            }
+        }
+        return null;
+    }
+}
