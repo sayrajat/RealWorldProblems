@@ -1,0 +1,199 @@
+import csv
+import datetime
+import sys
+from bson.objectid import ObjectId
+from bson.codec_options import CodecOptions
+from bson.binary import JAVA_LEGACY
+#from bson.binary import JAVA_LEGACY
+#from bson.codec_options import CodecOptions
+from pymongo import MongoClient
+
+listOfLists = []
+
+def runScript():
+#    listOfIds = ['60a369c27c2b5872f5201c46','609a22e77c2b5872f51dcade','6094ce947c2b5872f51c926d','6094e4427c2b5872f51ca227','6093ca527c2b58ef78d269eb','608bb1327c2b58ef78d0249a','608fbd647c2b58ef78d0cb06','608f98a47c2b58ef78d0a7b0','608f9c277c2b58ef78d0abaf','608bdc687c2b58ef78d0551d','608f90d37c2b58ef78d0a0a5','608b8fe97c2b58ef78d00550','608feb557c2b58ef78d0fba8','608bb1487c2b58ef78d024fd','608f98727c2b58ef78d0a771','608feb507c2b58ef78d0fb98','608f867e7c2b58ef78d09b94','608fc77e7c2b58ef78d0d861','608bae897c2b58ef78d02032','608698cc7c2b580321c2918b','60868bed7c2b580321c283b3','6082967f7c2b580321c16c1d','60824ccb7c2b580321c12ec5','607fc90e7c2b580321c03899','607e92507c2b580321bfc3ac','607d40a67c2b580321bf2d2f','6076eca07c2b58f1b4119d25','607697f57c2b58f1b41156f9','606fd5847c2b58f1b40f8f15','606ea13f7c2b58f1b40f264b','6073f29a7c2b58f1b410961e','606e8c757c2b58f1b40f1cb8','606c22037c2b58d092e82421','606c311c7c2b58d092e8353e','606bf32d7c2b58d092e7eec7','606c2be47c2b58d092e83048','6066fba97c2b58d092e6e77d','603e27de7c2b589dc37e8f3a','60ab8f1b7c2b58b7a98d481f','60ab83c27c2b58b7a98d3ec4','60a752897c2b58b9a7f07d12','608bb1487c2b58ef78d024fd','608a49e87c2b58ef78cf925c','608aa0837c2b58ef78cfe216','608938e27c2b58ef78cf5060','608931ed7c2b58ef78cf485c','608295be7c2b580321c16b0e','606eea0c7c2b58f1b40f6e1d']
+    document = getDocument()
+#    checkStatus(listOfIds, document)
+#    group_item_status_with_query(document);
+    readCSV(document)
+    generateExcelReport();
+#    readCSVToCheckIfItemInQC(document);
+    print("Completed")
+
+
+def getDocument():
+    client = MongoClient('10.131.47.120', 27017)
+    db = client['COULSON']
+    document = db.get_collection('groupedItem', CodecOptions(uuid_representation=JAVA_LEGACY))
+    return document
+
+
+def checkStatus(listOfIds, document):
+    print("check status called")
+    for id in listOfIds:
+        my_query = {"_id": ObjectId(id)}
+        item = document.find_one(my_query)
+        localList = []
+        localList.append(id)
+        localList.append(item['currentStage']['stageName'])
+        localList.append(item['currentStage']['stageStatus'])
+        if ('remarks' in item['currentStage']) :
+            localList.append(item['currentStage']['remarks'])
+        else:
+            localList.append("")
+
+        if 'request' in item['currentStage']:
+            request = item['currentStage']['request']
+        else:
+            request = ''
+
+        localList.append(request)
+        localList.append(item['businessModel'])
+        localList.append(item['modifiedAt'])
+        listOfLists.append(localList)
+
+
+def generateExcelReport():
+    print("Creating File")
+    cols = ['ID', 'Stage', 'Status', 'BusinessModel','ModifiedAt']
+#    cols = ['ID', 'CurrentStage', 'CurrentStatus', 'BusinessModel','LastModified','IQCStatus','IQCDoneAt']
+    filename = "BusinessModel_Report_Aug_30.csv"
+    with open(filename, 'w', newline='') as csvfile:
+        csvwriter = csv.writer(csvfile)
+        csvwriter.writerow(cols)
+        csvwriter.writerows(listOfLists)
+
+
+def readCSV(document):
+    filename = "/Users/rajat2.mishra/Downloads/businessModel_Check_aug_30.csv";
+    rows = []
+    iterationCount = 0
+    with open(filename, 'r', encoding='utf-8-sig') as csvfile:
+        csvreader = csv.reader(csvfile)
+        # extracting each data row one by one
+        count = 0;
+        for row in csvreader:
+            try:
+                rows.append(ObjectId(row[0]))
+                count = count + 1
+                if count > 100:
+                    process_for_group_item_status(rows, iterationCount, document)
+                    rows.clear()
+                    count = 0
+                    iterationCount = iterationCount + 1
+            except:
+                print("Incorrect rowId")
+        if count > 0:
+            process_for_group_item_status(rows, iterationCount, document)
+            rows.clear()
+
+def process_for_group_item_status_with_iqc_cqc_date(rows, iterationCount, document):
+    print("Called", iterationCount)
+    query = {'_id': {'$in': rows}}
+    items = document.find(query);
+    for item in items:
+        localList = [];
+        localList.append(item['_id'])
+        localList.append(item['currentStage']['stageName'])
+        localList.append(item['currentStage']['stageStatus'])
+        localList.append(item['businessModel'])
+        localList.append(item['modifiedAt'])
+
+        iqc = False;
+        if item['businessModel'] == 'B2C':
+            stages = item['stages'];
+            for stage in stages:
+                if stage['stageName'] == 'IQC':
+                    localList.append(stage['stageStatus']);
+                    localList.append(stage['modifiedAt']);
+                    iqc = True;
+
+        if not iqc:
+            localList.append("NO IQC")
+            localList.append("")
+        listOfLists.append(localList)
+
+
+def process_for_group_item_status(rows, iterationCount, document):
+    print("Called", iterationCount)
+    query = {'_id': {'$in': rows}}
+    items = document.find(query);
+    for item in items:
+        localList = [];
+        localList.append(item['_id'])
+        localList.append(item['currentStage']['stageName'])
+        localList.append(item['currentStage']['stageStatus'])
+        localList.append(item['businessModel'])
+        localList.append(item['modifiedAt'])
+
+#        iqc = False;
+#        if item['businessModel'] == 'B2C':
+#            stages = item['stages'];
+#            for stage in stages:
+#                if stage['stageName'] == 'IQC':
+#                    localList.append("IQC Done")
+#                    localList.append(stage['stageStatus'])
+#                    iqc = True;
+
+#        if not iqc:
+#            localList.append("NO IQC")
+#            localList.append("")
+        listOfLists.append(localList)
+
+
+def group_item_status_with_query(document):
+#    query = {"currentStage.stageName": "IQC", "stages.stageStatus": 'PENDING', "currentStage.request": {'$ne': None}}
+    query = {"currentStage.stageName":'IQC', "currentStage.stageStatus":'PENDING', "modifiedAt":"{$lt:ISODate('2020-12-25')}", "modifiedAt":"{$gt:ISODate('2020-09-01')}"}
+    items = document.find(query);
+    for item in items:
+        id = item['_id']
+        stage = item['currentStage']['stageName']
+        status = item['currentStage']['stageStatus']
+        remarks = item['currentStage']['remarks']
+        if 'request' in item['currentStage']:
+            request = item['currentStage']['request']
+        else:
+            request = ''
+        lastmodified = item['modifiedAt']
+        localList = []
+        localList.append(id)
+        localList.append(stage)
+        localList.append(status)
+        localList.append(remarks)
+        localList.append(request)
+        localList.append(lastmodified)
+        listOfLists.append(localList)
+
+
+def check_if_rowId_in_qc(document, rowId):
+    query = {"resourceList": rowId};
+    item = document.find_one(query);
+    localList = [];
+    if item is None:
+        localList.append(rowId)
+        localList.append("NA")
+        localList.append("NA")
+        localList.append("NA")
+    else:
+        localList.append(rowId)
+        localList.append(item['_id'])
+        localList.append(item['currentStage']['stageName'])
+        localList.append(item['currentStage']['stageStatus'])
+    listOfLists.append(localList);
+
+
+def readCSVToCheckIfItemInQC(document):
+    filename = "/Users/rajat2.mishra/Downloads/qc_progress_styles_aug_4.csv";
+    rows = []
+    iterationCount = 0
+    with open(filename, 'r', encoding='utf-8-sig') as csvfile:
+        csvreader = csv.reader(csvfile)
+        count = 0;
+        for row in csvreader:
+            iterationCount = iterationCount + 1
+            print(iterationCount)
+            check_if_rowId_in_qc(document, row[0])
+
+    generateExcelReport();
+
+runScript();
